@@ -1,0 +1,671 @@
+import './styles.css';
+
+// ===== Types =====
+interface Settings {
+  fontSize: number;
+  lineHeight: number;
+  fontFamily: string;
+  theme: 'dark' | 'studio' | 'light' | 'high-contrast';
+  readPosition: 'center' | 'upper' | 'lower';
+  fadeEdges: boolean;
+  guideLine: boolean;
+  defaultSpeed: number;
+  countdown: boolean;
+  autoHideControls: boolean;
+}
+
+interface ScriptData {
+  title: string;
+  content: string;
+  updatedAt: number;
+}
+
+// ===== Constants =====
+const STORAGE_KEY = 'teleprompter-pro';
+const WPM_KOREAN = 150;
+
+const DEFAULT_SETTINGS: Settings = {
+  fontSize: 42,
+  lineHeight: 1.8,
+  fontFamily: "'Noto Sans KR', sans-serif",
+  theme: 'dark',
+  readPosition: 'center',
+  fadeEdges: true,
+  guideLine: true,
+  defaultSpeed: 50,
+  countdown: true,
+  autoHideControls: true,
+};
+
+// ===== DOM Elements =====
+const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
+
+const welcome = $('#welcome');
+const prompterView = $('#prompter-view');
+const welcomeNewBtn = $('#btn-new-script');
+const fileImport = $('#file-import') as HTMLInputElement;
+const fileImportEditor = $('#file-import-editor') as HTMLInputElement;
+
+const btnBack = $('#btn-back');
+const scriptTitle = $('#script-title');
+const btnPlay = $('#btn-play');
+const playIcon = $('#play-icon');
+const playLabel = $('#play-label');
+const btnSpeedDown = $('#btn-speed-down');
+const btnSpeedUp = $('#btn-speed-up');
+const speedDisplay = $('#speed-display');
+const btnEdit = $('#btn-edit');
+const btnMirror = $('#btn-mirror');
+const btnFullscreen = $('#btn-fullscreen');
+const btnSettings = $('#btn-settings');
+
+const progressBar = $('#progress-bar');
+const displayArea = $('#display-area');
+const fadeTop = $('#fade-top');
+const fadeBottom = $('#fade-bottom');
+const readingGuide = $('#reading-guide');
+const scrollContainer = $('#scroll-container');
+const scriptContent = $('#script-content');
+
+const editorOverlay = $('#editor-overlay');
+const titleInput = $('#title-input') as HTMLInputElement;
+const scriptEditor = $('#script-editor') as HTMLTextAreaElement;
+const charCount = $('#char-count');
+const wordCount = $('#word-count');
+const readTime = $('#read-time');
+const btnExport = $('#btn-export');
+const btnClear = $('#btn-clear');
+const btnDoneEdit = $('#btn-done-edit');
+
+const statusProgress = $('#status-progress');
+const statusElapsed = $('#status-elapsed');
+const statusRemaining = $('#status-remaining');
+
+const countdownEl = $('#countdown');
+const countdownNumber = $('#countdown-number');
+
+const settingsPanel = $('#settings-panel');
+const settingsBackdrop = $('#settings-backdrop');
+const btnCloseSettings = $('#btn-close-settings');
+const btnResetSettings = $('#btn-reset-settings');
+const shortcutsHint = $('#shortcuts-hint');
+
+// Setting inputs
+const settingFontSize = $('#setting-font-size') as HTMLInputElement;
+const settingLineHeight = $('#setting-line-height') as HTMLInputElement;
+const settingFontFamily = $('#setting-font-family') as HTMLSelectElement;
+const settingTheme = $('#setting-theme') as HTMLSelectElement;
+const settingReadPosition = $('#setting-read-position') as HTMLSelectElement;
+const settingFadeEdges = $('#setting-fade-edges') as HTMLInputElement;
+const settingGuideLine = $('#setting-guide-line') as HTMLInputElement;
+const settingDefaultSpeed = $('#setting-default-speed') as HTMLInputElement;
+const settingCountdown = $('#setting-countdown') as HTMLInputElement;
+const settingAutoHide = $('#setting-auto-hide') as HTMLInputElement;
+const fontSizeVal = $('#font-size-val');
+const lineHeightVal = $('#line-height-val');
+const defaultSpeedVal = $('#default-speed-val');
+
+// ===== State =====
+let settings: Settings = { ...DEFAULT_SETTINGS };
+let script: ScriptData = { title: '새 대본', content: '', updatedAt: Date.now() };
+let isPlaying = false;
+let isEditing = false;
+let isMirrored = false;
+let speed = 50;
+let scrollPosition = 0;
+let maxScroll = 0;
+let animationId: number | null = null;
+let playStartTime = 0;
+let elapsedBeforePause = 0;
+let controlsHideTimer: ReturnType<typeof setTimeout> | null = null;
+let shortcutsVisible = false;
+
+// ===== Persistence =====
+function loadState(): void {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    if (data.settings) settings = { ...DEFAULT_SETTINGS, ...data.settings };
+    if (data.script) script = data.script;
+    if (data.speed) speed = data.speed;
+  } catch { /* ignore corrupt data */ }
+}
+
+function saveState(): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ settings, script, speed }));
+}
+
+// ===== Script Parsing =====
+function parseScript(text: string): string {
+  const lines = text.split('\n');
+  return lines.map(line => {
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith('//')) {
+      const label = trimmed.slice(2).trim();
+      return `<span class="section-label">${escapeHtml(label)}</span>`;
+    }
+    return escapeHtml(line).replace(/\[([^\]]+)\]/g, '<span class="cue-hint">[$1]</span>');
+  }).join('\n');
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function countWords(text: string): number {
+  const korean = (text.match(/[\uAC00-\uD7AF]/g) || []).length;
+  const english = (text.match(/[a-zA-Z]+/g) || []).length;
+  return korean + english;
+}
+
+function estimateReadTime(text: string): string {
+  const words = countWords(text);
+  const minutes = words / WPM_KOREAN;
+  if (minutes < 1) return '약 1분 미만';
+  const m = Math.floor(minutes);
+  const s = Math.round((minutes - m) * 60);
+  return s > 0 ? `약 ${m}분 ${s}초` : `약 ${m}분`;
+}
+
+function updateEditorMeta(): void {
+  const text = scriptEditor.value;
+  const chars = text.replace(/\s/g, '').length;
+  charCount.textContent = `${chars.toLocaleString()}자`;
+  wordCount.textContent = `${countWords(text).toLocaleString()}단어`;
+  readTime.textContent = estimateReadTime(text);
+}
+
+// ===== Settings Application =====
+function applySettings(): void {
+  document.documentElement.setAttribute('data-theme', settings.theme);
+
+  scriptContent.style.fontSize = `${settings.fontSize}px`;
+  scriptContent.style.lineHeight = String(settings.lineHeight);
+  scriptContent.style.fontFamily = settings.fontFamily;
+  document.documentElement.style.setProperty('--font-script', settings.fontFamily);
+
+  fadeTop.classList.toggle('disabled', !settings.fadeEdges);
+  fadeBottom.classList.toggle('disabled', !settings.fadeEdges);
+  readingGuide.style.display = settings.guideLine ? '' : 'none';
+
+  updateGuidePosition();
+  syncSettingsUI();
+}
+
+function updateGuidePosition(): void {
+  const positions: Record<Settings['readPosition'], string> = {
+    center: '50%',
+    upper: '33%',
+    lower: '66%',
+  };
+  readingGuide.style.top = positions[settings.readPosition];
+}
+
+function syncSettingsUI(): void {
+  settingFontSize.value = String(settings.fontSize);
+  settingLineHeight.value = String(settings.lineHeight);
+  settingFontFamily.value = settings.fontFamily;
+  settingTheme.value = settings.theme;
+  settingReadPosition.value = settings.readPosition;
+  settingFadeEdges.checked = settings.fadeEdges;
+  settingGuideLine.checked = settings.guideLine;
+  settingDefaultSpeed.value = String(settings.defaultSpeed);
+  settingCountdown.checked = settings.countdown;
+  settingAutoHide.checked = settings.autoHideControls;
+  fontSizeVal.textContent = `${settings.fontSize}px`;
+  lineHeightVal.textContent = String(settings.lineHeight);
+  defaultSpeedVal.textContent = String(settings.defaultSpeed);
+}
+
+// ===== View Management =====
+function showWelcome(): void {
+  stopPlay();
+  welcome.classList.remove('hidden');
+  prompterView.classList.add('hidden');
+}
+
+function showPrompter(edit = false): void {
+  welcome.classList.add('hidden');
+  prompterView.classList.remove('hidden');
+  renderScript();
+  applySettings();
+  speed = settings.defaultSpeed;
+  speedDisplay.textContent = String(speed);
+  scriptTitle.textContent = script.title;
+
+  if (edit || !script.content) {
+    openEditor();
+  } else {
+    closeEditor();
+  }
+}
+
+function openEditor(): void {
+  isEditing = true;
+  editorOverlay.classList.remove('hidden');
+  titleInput.value = script.title;
+  scriptEditor.value = script.content;
+  updateEditorMeta();
+  scriptEditor.focus();
+  stopPlay();
+}
+
+function closeEditor(): void {
+  script.title = titleInput.value.trim() || '새 대본';
+  script.content = scriptEditor.value;
+  script.updatedAt = Date.now();
+  isEditing = false;
+  editorOverlay.classList.add('hidden');
+  scriptTitle.textContent = script.title;
+  renderScript();
+  saveState();
+}
+
+function renderScript(): void {
+  scriptContent.innerHTML = parseScript(script.content) || '<span style="opacity:0.4">대본을 입력하세요...</span>';
+  resetScroll();
+}
+
+// ===== Scroll & Playback =====
+function resetScroll(): void {
+  scrollPosition = 0;
+  scrollContainer.scrollTop = 0;
+  updateProgress();
+}
+
+function getMaxScroll(): number {
+  return scrollContainer.scrollHeight - scrollContainer.clientHeight;
+}
+
+function updateProgress(): void {
+  maxScroll = getMaxScroll();
+  const pct = maxScroll > 0 ? Math.min(100, (scrollPosition / maxScroll) * 100) : 0;
+  progressBar.style.width = `${pct}%`;
+  statusProgress.textContent = `${Math.round(pct)}%`;
+
+  const totalWords = countWords(script.content);
+  const totalTime = (totalWords / WPM_KOREAN) * 60;
+  const elapsed = isPlaying
+    ? elapsedBeforePause + (performance.now() - playStartTime) / 1000
+    : elapsedBeforePause;
+  const remaining = Math.max(0, totalTime - elapsed);
+
+  statusElapsed.textContent = formatTime(elapsed);
+  statusRemaining.textContent = `남은 ${formatTime(remaining)}`;
+}
+
+function formatTime(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function scrollLoop(timestamp: number): void {
+  if (!isPlaying) return;
+
+  if (!playStartTime) playStartTime = timestamp;
+  const delta = timestamp - (scrollLoop as { lastTime?: number }).lastTime!;
+  (scrollLoop as { lastTime?: number }).lastTime = timestamp;
+
+  const pixelsPerSecond = speed * 1.2;
+  scrollPosition += (pixelsPerSecond * delta) / 1000;
+  scrollPosition = Math.min(scrollPosition, getMaxScroll());
+  scrollContainer.scrollTop = scrollPosition;
+
+  updateProgress();
+
+  if (scrollPosition >= getMaxScroll()) {
+    stopPlay();
+    return;
+  }
+
+  animationId = requestAnimationFrame(scrollLoop);
+}
+
+function startPlay(): void {
+  if (isEditing || !script.content.trim()) return;
+
+  if (settings.countdown) {
+    runCountdown(() => beginScroll());
+  } else {
+    beginScroll();
+  }
+}
+
+function beginScroll(): void {
+  isPlaying = true;
+  playIcon.textContent = '⏸';
+  playLabel.textContent = '일시정지';
+  playStartTime = 0;
+  (scrollLoop as { lastTime?: number }).lastTime = undefined;
+  animationId = requestAnimationFrame(scrollLoop);
+  scheduleHideControls();
+}
+
+function stopPlay(): void {
+  if (isPlaying) {
+    elapsedBeforePause += (performance.now() - playStartTime) / 1000;
+  }
+  isPlaying = false;
+  playIcon.textContent = '▶';
+  playLabel.textContent = '시작';
+  if (animationId !== null) {
+    cancelAnimationFrame(animationId);
+    animationId = null;
+  }
+  showControls();
+}
+
+function togglePlay(): void {
+  if (isPlaying) {
+    stopPlay();
+  } else {
+    if (scrollPosition >= getMaxScroll()) {
+      resetScroll();
+      elapsedBeforePause = 0;
+    }
+    startPlay();
+  }
+}
+
+function runCountdown(callback: () => void): void {
+  let count = 3;
+  countdownEl.classList.remove('hidden');
+  countdownNumber.textContent = String(count);
+
+  const tick = () => {
+    count--;
+    if (count > 0) {
+      countdownNumber.textContent = String(count);
+      setTimeout(tick, 1000);
+    } else {
+      countdownEl.classList.add('hidden');
+      callback();
+    }
+  };
+  setTimeout(tick, 1000);
+}
+
+// ===== Speed =====
+function changeSpeed(delta: number): void {
+  speed = Math.max(1, Math.min(100, speed + delta));
+  speedDisplay.textContent = String(speed);
+  saveState();
+}
+
+// ===== Mirror & Fullscreen =====
+function toggleMirror(): void {
+  isMirrored = !isMirrored;
+  prompterView.classList.toggle('mirrored', isMirrored);
+  btnMirror.classList.toggle('btn-accent', isMirrored);
+}
+
+async function toggleFullscreen(): Promise<void> {
+  if (!document.fullscreenElement) {
+    await prompterView.requestFullscreen();
+  } else {
+    await document.exitFullscreen();
+  }
+}
+
+// ===== Controls visibility =====
+function scheduleHideControls(): void {
+  if (!settings.autoHideControls || !isPlaying) return;
+  if (controlsHideTimer) clearTimeout(controlsHideTimer);
+  controlsHideTimer = setTimeout(() => {
+    if (isPlaying) prompterView.classList.add('controls-hidden');
+  }, 3000);
+}
+
+function showControls(): void {
+  prompterView.classList.remove('controls-hidden');
+  if (controlsHideTimer) clearTimeout(controlsHideTimer);
+}
+
+// ===== Settings Panel =====
+function openSettings(): void {
+  settingsPanel.classList.remove('hidden');
+  settingsBackdrop.classList.remove('hidden');
+}
+
+function closeSettingsPanel(): void {
+  settingsPanel.classList.add('hidden');
+  settingsBackdrop.classList.add('hidden');
+  saveState();
+}
+
+function resetSettings(): void {
+  settings = { ...DEFAULT_SETTINGS };
+  speed = settings.defaultSpeed;
+  speedDisplay.textContent = String(speed);
+  applySettings();
+  saveState();
+}
+
+// ===== File I/O =====
+function importFile(file: File): void {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const text = reader.result as string;
+    script.content = text;
+    script.title = file.name.replace(/\.(txt|md|text)$/i, '');
+    script.updatedAt = Date.now();
+    showPrompter(true);
+    saveState();
+  };
+  reader.readAsText(file, 'UTF-8');
+}
+
+function exportScript(): void {
+  const blob = new Blob([scriptEditor.value], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${titleInput.value.trim() || '대본'}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ===== Keyboard Shortcuts =====
+function handleKeydown(e: KeyboardEvent): void {
+  const target = e.target as HTMLElement;
+  if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') {
+    if (e.key === 'Escape' && isEditing) {
+      closeEditor();
+    }
+    return;
+  }
+
+  switch (e.key) {
+    case ' ':
+      e.preventDefault();
+      togglePlay();
+      break;
+    case 'ArrowUp':
+      e.preventDefault();
+      changeSpeed(5);
+      break;
+    case 'ArrowDown':
+      e.preventDefault();
+      changeSpeed(-5);
+      break;
+    case 'e':
+    case 'E':
+      if (!isEditing) openEditor();
+      break;
+    case 'm':
+    case 'M':
+      toggleMirror();
+      break;
+    case 'f':
+    case 'F':
+      toggleFullscreen();
+      break;
+    case 'r':
+    case 'R':
+      resetScroll();
+      elapsedBeforePause = 0;
+      break;
+    case 'Escape':
+      if (!settingsPanel.classList.contains('hidden')) {
+        closeSettingsPanel();
+      } else if (shortcutsVisible) {
+        shortcutsHint.classList.add('hidden');
+        shortcutsVisible = false;
+      } else {
+        showControls();
+      }
+      break;
+    case '?':
+      shortcutsVisible = !shortcutsVisible;
+      shortcutsHint.classList.toggle('hidden', !shortcutsVisible);
+      break;
+    case '+':
+    case '=':
+      changeSpeed(5);
+      break;
+    case '-':
+      changeSpeed(-5);
+      break;
+  }
+}
+
+// ===== Event Listeners =====
+function bindEvents(): void {
+  welcomeNewBtn.addEventListener('click', () => {
+    script = { title: '새 대본', content: '', updatedAt: Date.now() };
+    showPrompter(true);
+  });
+
+  fileImport.addEventListener('change', () => {
+    const file = fileImport.files?.[0];
+    if (file) importFile(file);
+    fileImport.value = '';
+  });
+
+  fileImportEditor.addEventListener('change', () => {
+    const file = fileImportEditor.files?.[0];
+    if (file) importFile(file);
+    fileImportEditor.value = '';
+  });
+
+  btnBack.addEventListener('click', () => {
+    stopPlay();
+    saveState();
+    showWelcome();
+  });
+
+  btnPlay.addEventListener('click', togglePlay);
+  btnSpeedUp.addEventListener('click', () => changeSpeed(5));
+  btnSpeedDown.addEventListener('click', () => changeSpeed(-5));
+  btnEdit.addEventListener('click', openEditor);
+  btnMirror.addEventListener('click', toggleMirror);
+  btnFullscreen.addEventListener('click', toggleFullscreen);
+  btnSettings.addEventListener('click', openSettings);
+
+  btnDoneEdit.addEventListener('click', closeEditor);
+  btnClear.addEventListener('click', () => {
+    if (confirm('대본을 모두 지울까요?')) {
+      scriptEditor.value = '';
+      updateEditorMeta();
+    }
+  });
+  btnExport.addEventListener('click', exportScript);
+  scriptEditor.addEventListener('input', () => {
+    updateEditorMeta();
+    clearTimeout((scriptEditor as { saveTimer?: ReturnType<typeof setTimeout> }).saveTimer);
+    (scriptEditor as { saveTimer?: ReturnType<typeof setTimeout> }).saveTimer = setTimeout(() => {
+      script.content = scriptEditor.value;
+      script.title = titleInput.value.trim() || '새 대본';
+      saveState();
+    }, 500);
+  });
+  titleInput.addEventListener('input', () => {
+    script.title = titleInput.value.trim() || '새 대본';
+  });
+
+  btnCloseSettings.addEventListener('click', closeSettingsPanel);
+  settingsBackdrop.addEventListener('click', closeSettingsPanel);
+  btnResetSettings.addEventListener('click', resetSettings);
+
+  // Settings change handlers
+  settingFontSize.addEventListener('input', () => {
+    settings.fontSize = Number(settingFontSize.value);
+    fontSizeVal.textContent = `${settings.fontSize}px`;
+    applySettings();
+  });
+  settingLineHeight.addEventListener('input', () => {
+    settings.lineHeight = Number(settingLineHeight.value);
+    lineHeightVal.textContent = String(settings.lineHeight);
+    applySettings();
+  });
+  settingFontFamily.addEventListener('change', () => {
+    settings.fontFamily = settingFontFamily.value;
+    applySettings();
+  });
+  settingTheme.addEventListener('change', () => {
+    settings.theme = settingTheme.value as Settings['theme'];
+    applySettings();
+  });
+  settingReadPosition.addEventListener('change', () => {
+    settings.readPosition = settingReadPosition.value as Settings['readPosition'];
+    updateGuidePosition();
+  });
+  settingFadeEdges.addEventListener('change', () => {
+    settings.fadeEdges = settingFadeEdges.checked;
+    applySettings();
+  });
+  settingGuideLine.addEventListener('change', () => {
+    settings.guideLine = settingGuideLine.checked;
+    applySettings();
+  });
+  settingDefaultSpeed.addEventListener('input', () => {
+    settings.defaultSpeed = Number(settingDefaultSpeed.value);
+    defaultSpeedVal.textContent = String(settings.defaultSpeed);
+  });
+  settingCountdown.addEventListener('change', () => {
+    settings.countdown = settingCountdown.checked;
+  });
+  settingAutoHide.addEventListener('change', () => {
+    settings.autoHideControls = settingAutoHide.checked;
+  });
+
+  displayArea.addEventListener('mousemove', () => {
+    if (isPlaying) {
+      showControls();
+      scheduleHideControls();
+    }
+  });
+
+  scrollContainer.addEventListener('wheel', (e) => {
+    if (isPlaying) {
+      e.preventDefault();
+      changeSpeed(e.deltaY < 0 ? 2 : -2);
+    }
+  }, { passive: false });
+
+  document.addEventListener('keydown', handleKeydown);
+
+  window.addEventListener('resize', () => {
+    updateGuidePosition();
+    maxScroll = getMaxScroll();
+  });
+}
+
+// ===== Init =====
+function init(): void {
+  loadState();
+  applySettings();
+  bindEvents();
+
+  if (script.content) {
+    showPrompter(false);
+  }
+}
+
+init();
