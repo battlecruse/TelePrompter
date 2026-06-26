@@ -305,12 +305,21 @@ function formatTime(seconds: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+let lastFrameTime: number | null = null;
+
 function scrollLoop(timestamp: number): void {
   if (!isPlaying) return;
 
   if (!playStartTime) playStartTime = timestamp;
-  const delta = timestamp - (scrollLoop as { lastTime?: number }).lastTime!;
-  (scrollLoop as { lastTime?: number }).lastTime = timestamp;
+
+  if (lastFrameTime === null) {
+    lastFrameTime = timestamp;
+    animationId = requestAnimationFrame(scrollLoop);
+    return;
+  }
+
+  const delta = timestamp - lastFrameTime;
+  lastFrameTime = timestamp;
 
   const pixelsPerSecond = speed * 1.2;
   scrollPosition += (pixelsPerSecond * delta) / 1000;
@@ -342,13 +351,13 @@ function beginScroll(): void {
   playIcon.textContent = '⏸';
   playLabel.textContent = '일시정지';
   playStartTime = 0;
-  (scrollLoop as { lastTime?: number }).lastTime = undefined;
+  lastFrameTime = null;
   animationId = requestAnimationFrame(scrollLoop);
   scheduleHideControls();
 }
 
 function stopPlay(): void {
-  if (isPlaying) {
+  if (isPlaying && playStartTime > 0) {
     elapsedBeforePause += (performance.now() - playStartTime) / 1000;
   }
   isPlaying = false;
