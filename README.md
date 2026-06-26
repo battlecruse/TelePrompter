@@ -36,10 +36,13 @@ npm run dev
 
 ## 배포 (GitHub Pages)
 
+`run.bat` 실행 후 **2** 선택, 또는:
+
 ```bash
-npm run build
-# dist/ 폴더를 GitHub Pages에 배포
+run.bat deploy
 ```
+
+배포 주소: https://battlecruse.github.io/TelePrompter/
 
 ## 기존 TelePrompter 대비 개선점
 
