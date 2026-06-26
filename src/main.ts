@@ -22,6 +22,8 @@ interface ScriptData {
 
 // ===== Constants =====
 const STORAGE_KEY = 'teleprompter-pro';
+const FILE_DB_NAME = 'teleprompter-pro-files';
+const FILE_DB_STORE = 'handles';
 const WPM_KOREAN = 150;
 
 const DEFAULT_SETTINGS: Settings = {
@@ -73,7 +75,8 @@ const scriptEditor = $('#script-editor') as HTMLTextAreaElement;
 const charCount = $('#char-count');
 const wordCount = $('#word-count');
 const readTime = $('#read-time');
-const btnExport = $('#btn-export');
+const btnSave = $('#btn-save');
+const saveStatus = $('#save-status');
 const btnClear = $('#btn-clear');
 const btnDoneEdit = $('#btn-done-edit');
 
@@ -119,6 +122,10 @@ let playStartTime = 0;
 let elapsedBeforePause = 0;
 let controlsHideTimer: ReturnType<typeof setTimeout> | null = null;
 let shortcutsVisible = false;
+let linkedFileHandle: FileSystemFileHandle | null = null;
+let linkedFileName: string | null = null;
+let fileSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let fileSaveStatusTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ===== Persistence =====
 function loadState(): void {
@@ -134,6 +141,173 @@ function loadState(): void {
 
 function saveState(): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ settings, script, speed }));
+}
+
+// ===== PC File Auto-Save (File System Access API) =====
+function supportsFileSystemAccess(): boolean {
+  return 'showSaveFilePicker' in window;
+}
+
+function openFileDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(FILE_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(FILE_DB_STORE);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function storeFileHandle(handle: FileSystemFileHandle): Promise<void> {
+  const db = await openFileDB();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(FILE_DB_STORE, 'readwrite');
+    tx.objectStore(FILE_DB_STORE).put(handle, 'script');
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
+async function loadStoredFileHandle(): Promise<FileSystemFileHandle | null> {
+  try {
+    const db = await openFileDB();
+    const handle = await new Promise<FileSystemFileHandle | null>((resolve, reject) => {
+      const tx = db.transaction(FILE_DB_STORE, 'readonly');
+      const req = tx.objectStore(FILE_DB_STORE).get('script');
+      req.onsuccess = () => resolve((req.result as FileSystemFileHandle) ?? null);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+    return handle;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureWritePermission(handle: FileSystemFileHandle): Promise<boolean> {
+  if ((await handle.queryPermission({ mode: 'write' })) === 'granted') return true;
+  return (await handle.requestPermission({ mode: 'write' })) === 'granted';
+}
+
+function setSaveStatus(message: string, type: 'idle' | 'saving' | 'saved' | 'error' = 'idle'): void {
+  saveStatus.textContent = message;
+  saveStatus.className = `save-status${type !== 'idle' ? ` ${type}` : ''}`;
+  if (type === 'saved' || type === 'error') {
+    if (fileSaveStatusTimer) clearTimeout(fileSaveStatusTimer);
+    fileSaveStatusTimer = setTimeout(() => updateSaveStatus(), 3000);
+  }
+}
+
+function updateSaveStatus(): void {
+  if (linkedFileName) {
+    setSaveStatus(`자동 저장: ${linkedFileName}`);
+  } else if (supportsFileSystemAccess()) {
+    setSaveStatus('저장하기로 PC 파일을 연결하세요');
+  } else {
+    setSaveStatus('이 브라우저는 PC 자동 저장을 지원하지 않습니다');
+  }
+}
+
+async function writeToLinkedFile(content: string): Promise<boolean> {
+  if (!linkedFileHandle) return false;
+  if (!(await ensureWritePermission(linkedFileHandle))) {
+    setSaveStatus('파일 쓰기 권한이 없습니다', 'error');
+    return false;
+  }
+  try {
+    setSaveStatus('저장 중...', 'saving');
+    const writable = await linkedFileHandle.createWritable();
+    await writable.write(content);
+    await writable.close();
+    setSaveStatus(`저장됨: ${linkedFileName}`, 'saved');
+    return true;
+  } catch {
+    setSaveStatus('파일 저장 실패', 'error');
+    return false;
+  }
+}
+
+function scheduleFileSave(): void {
+  if (!linkedFileHandle) return;
+  if (fileSaveTimer) clearTimeout(fileSaveTimer);
+  fileSaveTimer = setTimeout(() => {
+    void writeToLinkedFile(scriptEditor.value);
+  }, 500);
+}
+
+async function linkLinkedFile(handle: FileSystemFileHandle): Promise<void> {
+  linkedFileHandle = handle;
+  linkedFileName = handle.name;
+  await storeFileHandle(handle);
+  updateSaveStatus();
+}
+
+async function restoreLinkedFile(): Promise<void> {
+  if (!supportsFileSystemAccess()) {
+    updateSaveStatus();
+    return;
+  }
+  const handle = await loadStoredFileHandle();
+  if (!handle) {
+    updateSaveStatus();
+    return;
+  }
+  linkedFileHandle = handle;
+  linkedFileName = handle.name;
+  updateSaveStatus();
+}
+
+async function saveToFile(): Promise<void> {
+  const content = scriptEditor.value;
+  const suggestedName = `${titleInput.value.trim() || '대본'}.txt`;
+
+  if (!supportsFileSystemAccess()) {
+    downloadAsFile(content, suggestedName);
+    setSaveStatus('파일을 다운로드했습니다', 'saved');
+    return;
+  }
+
+  try {
+    if (!linkedFileHandle) {
+      const handle = await window.showSaveFilePicker({
+        suggestedName,
+        types: [{ description: '텍스트 파일', accept: { 'text/plain': ['.txt', '.md'] } }],
+      });
+      await linkLinkedFile(handle);
+      await writeToLinkedFile(content);
+      return;
+    }
+
+    if (await writeToLinkedFile(content)) {
+      script.content = content;
+      script.title = titleInput.value.trim() || '새 대본';
+      saveState();
+    }
+  } catch (err) {
+    if ((err as Error).name !== 'AbortError') {
+      setSaveStatus('저장이 취소되었습니다', 'error');
+    }
+  }
+}
+
+function downloadAsFile(content: string, filename: string): void {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function syncEditorToState(): void {
+  script.content = scriptEditor.value;
+  script.title = titleInput.value.trim() || '새 대본';
+  script.updatedAt = Date.now();
+  saveState();
+  scheduleFileSave();
 }
 
 // ===== Script Parsing =====
@@ -251,6 +425,7 @@ function openEditor(): void {
   titleInput.value = script.title;
   scriptEditor.value = script.content;
   updateEditorMeta();
+  updateSaveStatus();
   scriptEditor.focus();
   stopPlay();
 }
@@ -264,6 +439,10 @@ function closeEditor(): void {
   scriptTitle.textContent = script.title;
   renderScript();
   saveState();
+  if (linkedFileHandle) {
+    if (fileSaveTimer) clearTimeout(fileSaveTimer);
+    void writeToLinkedFile(script.content);
+  }
 }
 
 function renderScript(): void {
@@ -470,16 +649,6 @@ function importFile(file: File): void {
   reader.readAsText(file, 'UTF-8');
 }
 
-function exportScript(): void {
-  const blob = new Blob([scriptEditor.value], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${titleInput.value.trim() || '대본'}.txt`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 // ===== Keyboard Shortcuts =====
 function handleKeydown(e: KeyboardEvent): void {
   const target = e.target as HTMLElement;
@@ -584,18 +753,17 @@ function bindEvents(): void {
       updateEditorMeta();
     }
   });
-  btnExport.addEventListener('click', exportScript);
+  btnSave.addEventListener('click', () => { void saveToFile(); });
   scriptEditor.addEventListener('input', () => {
     updateEditorMeta();
     clearTimeout((scriptEditor as { saveTimer?: ReturnType<typeof setTimeout> }).saveTimer);
     (scriptEditor as { saveTimer?: ReturnType<typeof setTimeout> }).saveTimer = setTimeout(() => {
-      script.content = scriptEditor.value;
-      script.title = titleInput.value.trim() || '새 대본';
-      saveState();
+      syncEditorToState();
     }, 500);
   });
   titleInput.addEventListener('input', () => {
     script.title = titleInput.value.trim() || '새 대본';
+    scheduleFileSave();
   });
 
   btnCloseSettings.addEventListener('click', closeSettingsPanel);
@@ -671,6 +839,7 @@ function init(): void {
   loadState();
   applySettings();
   bindEvents();
+  void restoreLinkedFile();
 
   if (script.content) {
     showPrompter(false);

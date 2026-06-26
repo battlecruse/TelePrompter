@@ -453,6 +453,19 @@ kbd {
   gap: 8px;
 }
 
+.save-status {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.save-status.saving { color: var(--accent); }
+.save-status.saved { color: #22c55e; }
+.save-status.error { color: #ef4444; }
+
 /* ===== Status Bar ===== */
 .status-bar {
   display: flex;
