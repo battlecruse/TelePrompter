@@ -129,10 +129,8 @@
             spellcheck="false"
           ></textarea>
           <div class="editor-footer">
-            <label class="btn btn-secondary btn-sm">
-              📂 불러오기
-              <input type="file" id="file-import-editor" accept=".txt,.md,.text" hidden />
-            </label>
+            <button id="btn-import-editor" type="button" class="btn btn-secondary btn-sm">📂 불러오기</button>
+            <input type="file" id="file-import-editor" accept=".txt,.md,.text" hidden />
             <button id="btn-save" class="btn btn-secondary btn-sm">💾 저장하기</button>
             <span id="save-status" class="save-status"></span>
             <div class="editor-footer-right">
@@ -280,6 +278,7 @@
         </ul>
         <p class="shortcuts-modal-footer"><kbd>Esc</kbd> 또는 바깥을 클릭해 닫기</p>
       </div>
+      <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

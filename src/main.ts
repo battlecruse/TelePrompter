@@ -76,7 +76,9 @@ const charCount = $('#char-count');
 const wordCount = $('#word-count');
 const readTime = $('#read-time');
 const btnSave = $('#btn-save');
+const btnImportEditor = $('#btn-import-editor');
 const saveStatus = $('#save-status');
+const toast = $('#toast');
 const btnClear = $('#btn-clear');
 const btnDoneEdit = $('#btn-done-edit');
 
@@ -128,6 +130,9 @@ let linkedFileHandle: FileSystemFileHandle | null = null;
 let linkedFileName: string | null = null;
 let fileSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let fileSaveStatusTimer: ReturnType<typeof setTimeout> | null = null;
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+const FILE_PERMISSION = { mode: 'readwrite' as const };
 
 // ===== Persistence =====
 function loadState(): void {
@@ -141,8 +146,20 @@ function loadState(): void {
   } catch { /* ignore corrupt data */ }
 }
 
-function saveState(): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ settings, script, speed }));
+function saveState(): boolean {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ settings, script, speed }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function showToast(message: string, duration = 2500): void {
+  toast.textContent = message;
+  toast.classList.remove('hidden');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.add('hidden'), duration);
 }
 
 // ===== PC File Auto-Save (File System Access API) =====
@@ -189,8 +206,8 @@ async function loadStoredFileHandle(): Promise<FileSystemFileHandle | null> {
 }
 
 async function ensureWritePermission(handle: FileSystemFileHandle): Promise<boolean> {
-  if ((await handle.queryPermission({ mode: 'write' })) === 'granted') return true;
-  return (await handle.requestPermission({ mode: 'write' })) === 'granted';
+  if ((await handle.queryPermission(FILE_PERMISSION)) === 'granted') return true;
+  return (await handle.requestPermission(FILE_PERMISSION)) === 'granted';
 }
 
 function setSaveStatus(message: string, type: 'idle' | 'saving' | 'saved' | 'error' = 'idle'): void {
@@ -225,7 +242,7 @@ async function writeToLinkedFile(content: string, silent = false): Promise<boole
   try {
     if (!silent) setSaveStatus('저장 중...', 'saving');
     const writable = await linkedFileHandle.createWritable();
-    await writable.write(content);
+    await writable.write(new Blob([content], { type: 'text/plain;charset=utf-8' }));
     await writable.close();
     if (!silent) {
       setSaveStatus(`저장됨: ${linkedFileName}`, 'saved');
@@ -314,31 +331,43 @@ async function restoreLinkedFile(): Promise<void> {
 
 async function saveToFile(): Promise<void> {
   const content = scriptEditor.value;
-  const suggestedName = `${titleInput.value.trim() || '대본'}.txt`;
+  const title = titleInput.value.trim() || '새 대본';
+  const suggestedName = `${title}.txt`;
+
+  script.content = content;
+  script.title = title;
+  script.updatedAt = Date.now();
+  if (!saveState()) {
+    setSaveStatus('브라우저 저장 공간을 사용할 수 없습니다', 'error');
+    return;
+  }
 
   if (!window.isSecureContext) {
     downloadAsFile(content, suggestedName);
     setSaveStatus('PC 저장 불가 — 다운로드로 저장했습니다', 'saved');
+    showToast('다운로드 폴더에 저장했습니다');
     return;
   }
 
   if (!supportsFileSystemAccess()) {
     downloadAsFile(content, suggestedName);
     setSaveStatus('파일을 다운로드했습니다', 'saved');
+    showToast('다운로드 폴더에 저장했습니다');
     return;
   }
 
   try {
+    if (linkedFileHandle && !(await ensureWritePermission(linkedFileHandle))) {
+      await clearLinkedFile();
+    }
+
     if (!linkedFileHandle) {
       const handle = await pickSaveFile(suggestedName);
       await linkLinkedFile(handle);
     }
 
     if (await writeToLinkedFile(content)) {
-      script.content = content;
-      script.title = titleInput.value.trim() || '새 대본';
-      script.updatedAt = Date.now();
-      saveState();
+      showToast(`PC 파일에 저장됨: ${linkedFileName}`);
     }
   } catch (err) {
     const message = getSaveErrorMessage(err);
@@ -366,6 +395,17 @@ function syncEditorToState(): void {
   script.updatedAt = Date.now();
   saveState();
   scheduleFileSave();
+}
+
+async function applyImportedScript(text: string, title: string, handle?: FileSystemFileHandle): Promise<void> {
+  script.content = text;
+  script.title = title;
+  script.updatedAt = Date.now();
+  saveState();
+  if (handle) {
+    await linkLinkedFile(handle);
+  }
+  showPrompter(true);
 }
 
 // ===== Script Parsing =====
@@ -496,10 +536,20 @@ function closeEditor(): void {
   editorOverlay.classList.add('hidden');
   scriptTitle.textContent = script.title;
   renderScript();
-  saveState();
+
+  const browserSaved = saveState();
+  if (!browserSaved) {
+    showToast('저장 실패: 브라우저 저장 공간을 확인해 주세요');
+    return;
+  }
+
   if (linkedFileHandle) {
     if (fileSaveTimer) clearTimeout(fileSaveTimer);
-    void writeToLinkedFile(script.content);
+    void writeToLinkedFile(script.content).then((ok) => {
+      showToast(ok ? `저장됨 — PC: ${linkedFileName}` : '브라우저에 저장됨');
+    });
+  } else {
+    showToast('브라우저에 저장됨');
   }
 }
 
@@ -715,13 +765,29 @@ function importFile(file: File): void {
   const reader = new FileReader();
   reader.onload = () => {
     const text = reader.result as string;
-    script.content = text;
-    script.title = file.name.replace(/\.(txt|md|text)$/i, '');
-    script.updatedAt = Date.now();
-    showPrompter(true);
-    saveState();
+    const title = file.name.replace(/\.(txt|md|text)$/i, '');
+    void applyImportedScript(text, title);
   };
   reader.readAsText(file, 'UTF-8');
+}
+
+async function importFromDisk(): Promise<void> {
+  if (window.isSecureContext && 'showOpenFilePicker' in window) {
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{ description: '텍스트 파일', accept: { 'text/plain': ['.txt', '.md', '.text'] } }],
+        multiple: false,
+      });
+      const file = await handle.getFile();
+      const text = await file.text();
+      const title = handle.name.replace(/\.(txt|md|text)$/i, '');
+      await applyImportedScript(text, title, handle);
+      return;
+    } catch (err) {
+      if (isUserCancelled(err)) return;
+    }
+  }
+  fileImportEditor.click();
 }
 
 // ===== Keyboard Shortcuts =====
@@ -827,6 +893,7 @@ function bindEvents(): void {
     }
   });
   btnSave.addEventListener('click', () => { void saveToFile(); });
+  btnImportEditor.addEventListener('click', () => { void importFromDisk(); });
   scriptEditor.addEventListener('input', () => {
     updateEditorMeta();
     clearTimeout((scriptEditor as { saveTimer?: ReturnType<typeof setTimeout> }).saveTimer);
