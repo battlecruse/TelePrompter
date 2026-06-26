@@ -92,6 +92,8 @@ const settingsBackdrop = $('#settings-backdrop');
 const btnCloseSettings = $('#btn-close-settings');
 const btnResetSettings = $('#btn-reset-settings');
 const shortcutsHint = $('#shortcuts-hint');
+const shortcutsBackdrop = $('#shortcuts-backdrop');
+const btnCloseShortcuts = $('#btn-close-shortcuts');
 
 // Setting inputs
 const settingFontSize = $('#setting-font-size') as HTMLInputElement;
@@ -210,21 +212,33 @@ function updateSaveStatus(): void {
   }
 }
 
-async function writeToLinkedFile(content: string): Promise<boolean> {
+async function writeToLinkedFile(content: string, silent = false): Promise<boolean> {
   if (!linkedFileHandle) return false;
   if (!(await ensureWritePermission(linkedFileHandle))) {
-    setSaveStatus('파일 쓰기 권한이 없습니다', 'error');
+    if (!silent) {
+      setSaveStatus('파일 쓰기 권한이 없습니다. 저장하기를 다시 눌러 주세요', 'error');
+      await clearLinkedFile();
+      updateSaveStatus();
+    }
     return false;
   }
   try {
-    setSaveStatus('저장 중...', 'saving');
+    if (!silent) setSaveStatus('저장 중...', 'saving');
     const writable = await linkedFileHandle.createWritable();
     await writable.write(content);
     await writable.close();
-    setSaveStatus(`저장됨: ${linkedFileName}`, 'saved');
+    if (!silent) {
+      setSaveStatus(`저장됨: ${linkedFileName}`, 'saved');
+    }
     return true;
-  } catch {
-    setSaveStatus('파일 저장 실패', 'error');
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'NotFoundError') {
+      await clearLinkedFile();
+      if (!silent) updateSaveStatus();
+    }
+    if (!silent) {
+      setSaveStatus(getSaveErrorMessage(err) || '파일 저장 실패', 'error');
+    }
     return false;
   }
 }
@@ -233,8 +247,47 @@ function scheduleFileSave(): void {
   if (!linkedFileHandle) return;
   if (fileSaveTimer) clearTimeout(fileSaveTimer);
   fileSaveTimer = setTimeout(() => {
-    void writeToLinkedFile(scriptEditor.value);
+    void writeToLinkedFile(scriptEditor.value, true);
   }, 500);
+}
+
+async function clearLinkedFile(): Promise<void> {
+  linkedFileHandle = null;
+  linkedFileName = null;
+  try {
+    const db = await openFileDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(FILE_DB_STORE, 'readwrite');
+      tx.objectStore(FILE_DB_STORE).delete('script');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch { /* ignore */ }
+}
+
+function isUserCancelled(err: unknown): boolean {
+  return err instanceof DOMException && (err.name === 'AbortError' || err.code === 20);
+}
+
+function getSaveErrorMessage(err: unknown): string {
+  if (isUserCancelled(err)) return '';
+  if (err instanceof DOMException) {
+    if (err.name === 'SecurityError') {
+      return 'PC 저장은 HTTPS 또는 localhost에서만 가능합니다';
+    }
+    if (err.name === 'NotAllowedError') {
+      return '파일 접근 권한이 거부되었습니다';
+    }
+    if (err.name === 'NotFoundError') {
+      return '파일을 찾을 수 없습니다. 다시 연결해 주세요';
+    }
+  }
+  return '파일 저장에 실패했습니다';
+}
+
+async function pickSaveFile(suggestedName: string): Promise<FileSystemFileHandle> {
+  return window.showSaveFilePicker({ suggestedName });
 }
 
 async function linkLinkedFile(handle: FileSystemFileHandle): Promise<void> {
@@ -263,6 +316,12 @@ async function saveToFile(): Promise<void> {
   const content = scriptEditor.value;
   const suggestedName = `${titleInput.value.trim() || '대본'}.txt`;
 
+  if (!window.isSecureContext) {
+    downloadAsFile(content, suggestedName);
+    setSaveStatus('PC 저장 불가 — 다운로드로 저장했습니다', 'saved');
+    return;
+  }
+
   if (!supportsFileSystemAccess()) {
     downloadAsFile(content, suggestedName);
     setSaveStatus('파일을 다운로드했습니다', 'saved');
@@ -271,23 +330,22 @@ async function saveToFile(): Promise<void> {
 
   try {
     if (!linkedFileHandle) {
-      const handle = await window.showSaveFilePicker({
-        suggestedName,
-        types: [{ description: '텍스트 파일', accept: { 'text/plain': ['.txt', '.md'] } }],
-      });
+      const handle = await pickSaveFile(suggestedName);
       await linkLinkedFile(handle);
-      await writeToLinkedFile(content);
-      return;
     }
 
     if (await writeToLinkedFile(content)) {
       script.content = content;
       script.title = titleInput.value.trim() || '새 대본';
+      script.updatedAt = Date.now();
       saveState();
     }
   } catch (err) {
-    if ((err as Error).name !== 'AbortError') {
-      setSaveStatus('저장이 취소되었습니다', 'error');
+    const message = getSaveErrorMessage(err);
+    if (message) {
+      setSaveStatus(message, 'error');
+    } else {
+      updateSaveStatus();
     }
   }
 }
@@ -615,6 +673,23 @@ function showControls(): void {
   if (controlsHideTimer) clearTimeout(controlsHideTimer);
 }
 
+function openShortcutsModal(): void {
+  shortcutsVisible = true;
+  shortcutsHint.classList.remove('hidden');
+  shortcutsBackdrop.classList.remove('hidden');
+}
+
+function closeShortcutsModal(): void {
+  shortcutsVisible = false;
+  shortcutsHint.classList.add('hidden');
+  shortcutsBackdrop.classList.add('hidden');
+}
+
+function toggleShortcutsModal(): void {
+  if (shortcutsVisible) closeShortcutsModal();
+  else openShortcutsModal();
+}
+
 // ===== Settings Panel =====
 function openSettings(): void {
   settingsPanel.classList.remove('hidden');
@@ -693,15 +768,13 @@ function handleKeydown(e: KeyboardEvent): void {
       if (!settingsPanel.classList.contains('hidden')) {
         closeSettingsPanel();
       } else if (shortcutsVisible) {
-        shortcutsHint.classList.add('hidden');
-        shortcutsVisible = false;
+        closeShortcutsModal();
       } else {
         showControls();
       }
       break;
     case '?':
-      shortcutsVisible = !shortcutsVisible;
-      shortcutsHint.classList.toggle('hidden', !shortcutsVisible);
+      toggleShortcutsModal();
       break;
     case '+':
     case '=':
@@ -769,6 +842,8 @@ function bindEvents(): void {
   btnCloseSettings.addEventListener('click', closeSettingsPanel);
   settingsBackdrop.addEventListener('click', closeSettingsPanel);
   btnResetSettings.addEventListener('click', resetSettings);
+  btnCloseShortcuts.addEventListener('click', closeShortcutsModal);
+  shortcutsBackdrop.addEventListener('click', closeShortcutsModal);
 
   // Settings change handlers
   settingFontSize.addEventListener('input', () => {

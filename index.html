@@ -38,8 +38,17 @@
               <input type="file" id="file-import" accept=".txt,.md,.text" hidden />
             </label>
           </div>
-          <p class="welcome-hint">
-            <kbd>Space</kbd> 재생/일시정지 · <kbd>↑↓</kbd> 속도 · <kbd>F</kbd> 전체화면 · <kbd>M</kbd> 미러
+          <p class="welcome-hint welcome-shortcuts">
+            <span class="welcome-shortcuts-title">자주 쓰는 단축키</span>
+            <span class="shortcut-chips">
+              <span class="shortcut-chip"><kbd>Space</kbd> 재생/일시정지</span>
+              <span class="shortcut-chip"><kbd>↑↓</kbd> 속도</span>
+              <span class="shortcut-chip"><kbd>F</kbd> 전체화면</span>
+              <span class="shortcut-chip"><kbd>M</kbd> 미러</span>
+              <span class="shortcut-chip"><kbd>E</kbd> 편집</span>
+              <span class="shortcut-chip"><kbd>R</kbd> 처음으로</span>
+            </span>
+            <span class="welcome-shortcuts-more"><kbd>?</kbd> 키를 누르면 전체 단축키 보기</span>
           </p>
         </div>
       </div>
@@ -58,17 +67,25 @@
             <button id="btn-play" class="btn btn-accent" title="재생 (Space)">
               <span id="play-icon">▶</span>
               <span id="play-label">시작</span>
+              <kbd class="btn-key">Space</kbd>
             </button>
-            <div class="speed-control">
+            <div class="speed-control" title="속도 조절 (↑↓)">
               <button id="btn-speed-down" class="btn btn-ghost btn-sm" title="속도 감소">−</button>
               <span id="speed-display" class="speed-display">50</span>
               <button id="btn-speed-up" class="btn btn-ghost btn-sm" title="속도 증가">+</button>
+              <kbd class="btn-key btn-key-sm">↑↓</kbd>
             </div>
           </div>
           <div class="toolbar-right">
-            <button id="btn-edit" class="btn btn-ghost" title="편집 (E)">편집</button>
-            <button id="btn-mirror" class="btn btn-ghost" title="미러 모드 (M)">미러</button>
-            <button id="btn-fullscreen" class="btn btn-ghost" title="전체화면 (F)">⛶</button>
+            <button id="btn-edit" class="btn btn-ghost" title="편집 (E)">
+              편집 <kbd class="btn-key">E</kbd>
+            </button>
+            <button id="btn-mirror" class="btn btn-ghost" title="미러 모드 (M)">
+              미러 <kbd class="btn-key">M</kbd>
+            </button>
+            <button id="btn-fullscreen" class="btn btn-ghost" title="전체화면 (F)">
+              ⛶ <kbd class="btn-key">F</kbd>
+            </button>
             <button id="btn-settings" class="btn btn-ghost" title="설정">⚙</button>
           </div>
         </header>
@@ -127,9 +144,16 @@
 
         <!-- Status bar -->
         <footer id="status-bar" class="status-bar">
-          <span id="status-progress">0%</span>
-          <span id="status-elapsed">00:00</span>
-          <span id="status-remaining">남은 00:00</span>
+          <div class="status-metrics">
+            <span id="status-progress">0%</span>
+            <span id="status-elapsed">00:00</span>
+            <span id="status-remaining">남은 00:00</span>
+          </div>
+          <div class="status-shortcuts" aria-label="단축키 안내">
+            <span><kbd>Space</kbd> 재생</span>
+            <span><kbd>↑↓</kbd> 속도</span>
+            <span><kbd>?</kbd> 도움말</span>
+          </div>
         </footer>
       </div>
 
@@ -213,6 +237,21 @@
               <input type="checkbox" id="setting-auto-hide" checked />
             </label>
           </section>
+
+          <section class="settings-section">
+            <h3>단축키</h3>
+            <ul class="shortcut-list">
+              <li><kbd>Space</kbd><span>재생 / 일시정지</span></li>
+              <li><kbd>↑</kbd> <kbd>↓</kbd><span>스크롤 속도 조절</span></li>
+              <li><kbd>E</kbd><span>편집 모드</span></li>
+              <li><kbd>M</kbd><span>미러 모드</span></li>
+              <li><kbd>F</kbd><span>전체화면</span></li>
+              <li><kbd>R</kbd><span>처음으로</span></li>
+              <li><kbd>+</kbd> <kbd>−</kbd><span>속도 미세 조절</span></li>
+              <li><kbd>?</kbd><span>단축키 도움말</span></li>
+              <li><kbd>Esc</kbd><span>닫기 / 컨트롤 표시</span></li>
+            </ul>
+          </section>
         </div>
         <div class="settings-footer">
           <button id="btn-reset-settings" class="btn btn-ghost btn-sm">기본값 복원</button>
@@ -222,15 +261,24 @@
       <!-- Settings backdrop -->
       <div id="settings-backdrop" class="settings-backdrop hidden"></div>
 
-      <!-- Keyboard shortcuts help -->
-      <div id="shortcuts-hint" class="shortcuts-hint hidden">
-        <kbd>Space</kbd> 재생/정지
-        <kbd>↑↓</kbd> 속도
-        <kbd>E</kbd> 편집
-        <kbd>M</kbd> 미러
-        <kbd>F</kbd> 전체화면
-        <kbd>R</kbd> 처음으로
-        <kbd>?</kbd> 단축키
+      <!-- Keyboard shortcuts modal -->
+      <div id="shortcuts-backdrop" class="shortcuts-backdrop hidden"></div>
+      <div id="shortcuts-hint" class="shortcuts-modal hidden" role="dialog" aria-label="단축키 도움말">
+        <div class="shortcuts-modal-header">
+          <h2>단축키</h2>
+          <button id="btn-close-shortcuts" class="btn btn-ghost btn-icon-only" aria-label="닫기">✕</button>
+        </div>
+        <ul class="shortcut-list shortcut-list-modal">
+          <li><kbd>Space</kbd><span>재생 / 일시정지</span></li>
+          <li><kbd>↑</kbd> <kbd>↓</kbd><span>스크롤 속도 조절</span></li>
+          <li><kbd>E</kbd><span>편집 모드</span></li>
+          <li><kbd>M</kbd><span>미러 모드</span></li>
+          <li><kbd>F</kbd><span>전체화면</span></li>
+          <li><kbd>R</kbd><span>처음으로</span></li>
+          <li><kbd>+</kbd> <kbd>−</kbd><span>속도 미세 조절</span></li>
+          <li><kbd>Esc</kbd><span>닫기 / 컨트롤 표시</span></li>
+        </ul>
+        <p class="shortcuts-modal-footer"><kbd>Esc</kbd> 또는 바깥을 클릭해 닫기</p>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
