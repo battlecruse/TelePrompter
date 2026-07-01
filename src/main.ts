@@ -229,37 +229,6 @@ function updateSaveStatus(): void {
   }
 }
 
-async function writeToLinkedFile(content: string, silent = false): Promise<boolean> {
-  if (!linkedFileHandle) return false;
-  if (!(await ensureWritePermission(linkedFileHandle))) {
-    if (!silent) {
-      setSaveStatus('파일 쓰기 권한이 없습니다. 저장하기를 다시 눌러 주세요', 'error');
-      await clearLinkedFile();
-      updateSaveStatus();
-    }
-    return false;
-  }
-  try {
-    if (!silent) setSaveStatus('저장 중...', 'saving');
-    const writable = await linkedFileHandle.createWritable();
-    await writable.write(new Blob([content], { type: 'text/plain;charset=utf-8' }));
-    await writable.close();
-    if (!silent) {
-      setSaveStatus(`저장됨: ${linkedFileName}`, 'saved');
-    }
-    return true;
-  } catch (err) {
-    if (err instanceof DOMException && err.name === 'NotFoundError') {
-      await clearLinkedFile();
-      if (!silent) updateSaveStatus();
-    }
-    if (!silent) {
-      setSaveStatus(getSaveErrorMessage(err) || '파일 저장 실패', 'error');
-    }
-    return false;
-  }
-}
-
 function scheduleFileSave(): void {
   if (!linkedFileHandle) return;
   if (fileSaveTimer) clearTimeout(fileSaveTimer);
@@ -299,19 +268,72 @@ function getSaveErrorMessage(err: unknown): string {
     if (err.name === 'NotFoundError') {
       return '파일을 찾을 수 없습니다. 다시 연결해 주세요';
     }
+    if (err.name === 'InvalidStateError' || err.name === 'NoModificationAllowedError') {
+      return '파일이 다른 프로그램에서 열려 있습니다';
+    }
+    return `파일 저장 오류 (${err.name})`;
+  }
+  if (err instanceof Error) {
+    return `파일 저장 오류: ${err.message}`;
   }
   return '파일 저장에 실패했습니다';
 }
 
-async function pickSaveFile(suggestedName: string): Promise<FileSystemFileHandle> {
-  return window.showSaveFilePicker({ suggestedName });
+async function writeHandleContent(
+  handle: FileSystemFileHandle,
+  content: string,
+  options: { silent?: boolean; skipPermissionCheck?: boolean } = {},
+): Promise<boolean> {
+  const { silent = false, skipPermissionCheck = false } = options;
+
+  if (!skipPermissionCheck && !(await ensureWritePermission(handle))) {
+    if (!silent) {
+      setSaveStatus('파일 쓰기 권한이 없습니다. 저장하기를 다시 눌러 주세요', 'error');
+    }
+    return false;
+  }
+
+  try {
+    if (!silent) setSaveStatus('저장 중...', 'saving');
+    const writable = await handle.createWritable();
+    await writable.write(new Blob([content], { type: 'text/plain;charset=utf-8' }));
+    await writable.close();
+    return true;
+  } catch (err) {
+    if (!silent) {
+      setSaveStatus(getSaveErrorMessage(err), 'error');
+    }
+    return false;
+  }
 }
 
-async function linkLinkedFile(handle: FileSystemFileHandle): Promise<void> {
+async function writeToLinkedFile(content: string, silent = false, skipPermissionCheck = false): Promise<boolean> {
+  if (!linkedFileHandle) return false;
+
+  const ok = await writeHandleContent(linkedFileHandle, content, { silent, skipPermissionCheck });
+  if (ok) {
+    if (!silent) setSaveStatus(`저장됨: ${linkedFileName}`, 'saved');
+    return true;
+  }
+
+  return false;
+}
+
+function rememberLinkedFile(handle: FileSystemFileHandle): void {
   linkedFileHandle = handle;
   linkedFileName = handle.name;
-  await storeFileHandle(handle);
+  void storeFileHandle(handle).catch(() => { /* 세션 저장 실패는 무시 */ });
   updateSaveStatus();
+}
+
+function fallbackDownload(content: string, filename: string): void {
+  downloadAsFile(content, filename);
+  setSaveStatus('다운로드로 저장했습니다', 'saved');
+  showToast('다운로드 폴더에 저장했습니다');
+}
+
+async function pickSaveFile(suggestedName: string): Promise<FileSystemFileHandle> {
+  return window.showSaveFilePicker({ suggestedName });
 }
 
 async function restoreLinkedFile(): Promise<void> {
@@ -363,12 +385,22 @@ async function saveToFile(): Promise<void> {
 
     if (!linkedFileHandle) {
       const handle = await pickSaveFile(suggestedName);
-      await linkLinkedFile(handle);
+      const ok = await writeHandleContent(handle, content, { skipPermissionCheck: true });
+      if (ok) {
+        rememberLinkedFile(handle);
+        showToast(`PC 파일에 저장됨: ${handle.name}`);
+        return;
+      }
+      fallbackDownload(content, suggestedName);
+      return;
     }
 
     if (await writeToLinkedFile(content)) {
       showToast(`PC 파일에 저장됨: ${linkedFileName}`);
+      return;
     }
+
+    fallbackDownload(content, suggestedName);
   } catch (err) {
     const message = getSaveErrorMessage(err);
     if (message) {
@@ -403,7 +435,7 @@ async function applyImportedScript(text: string, title: string, handle?: FileSys
   script.updatedAt = Date.now();
   saveState();
   if (handle) {
-    await linkLinkedFile(handle);
+    rememberLinkedFile(handle);
   }
   showPrompter(true);
 }
